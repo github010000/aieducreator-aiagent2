@@ -1,0 +1,32 @@
+[project]
+name = "aieducreator-aiagent2"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp==3.2.4",
+    "langchain-community==0.4.1",
+    "langchain-core==1.3.2",
+    "langchain-huggingface==1.2.2",
+    "langchain-mcp-adapters==0.2.2",
+    "langchain-openai==1.2.1",
+    "langchain-tavily==0.2.18",
+    "langchain-text-splitters==1.1.2",
+    "langgraph==1.1.9",
+    "pydantic==2.13.3",
+    "langgraph-checkpoint-sqlite==3.0.3",
+    "python-dotenv==1.2.2",
+    "requests==2.33.1",
+    "duckdb>=1.5.2",
+]
+
+[dependency-groups]
+dev = [
+    "black>=26.3.1",
+    "isort>=8.0.1",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["agent/tests"]
+asyncio_mode = "auto"
