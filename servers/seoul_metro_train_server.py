@@ -13,6 +13,9 @@ from pydantic import BaseModel, Field
 _folder = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_folder, "..", ".env"))
 
+LLM_BASE_URL = os.getenv("MSU_LLM_BASE_URL", "http://192.168.31.127:8888/v1")
+LLM_MODEL = os.getenv("MSU_LLM_MODEL", "qwen3.6:35b")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -113,23 +116,11 @@ class MetroQueryInput(BaseModel):
     description="특정 지하철 역의 실시간 열차 도착 정보를 조회하고 분석합니다. '강남역 다음 열차', '홍대입구 2호선 도착 시간' 등의 질문에 사용합니다.",
 )
 def get_realtime_arrival(input_data: MetroQueryInput) -> Dict[str, Any]:
-    """자연어 질문에서 역명을 추출하고 실시간 도착 정보를 반환."""
+    """역명을 직접 사용해 실시간 도착 정보를 조회하고 Qwen3으로 요약."""
     t_total = time.perf_counter()
-    logger.info("도착 정보 요청: '%s'", input_data.query)
-
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
-    extract_prompt = f"""
-    다음 질문에서 조회할 지하철 역명만 추출하세요.
-    역명만 출력하고, 다른 설명은 절대 포함하지 마세요.
-    '역' 접미어도 제외하세요. (예: 강남역 → 강남)
-
-    질문: {input_data.query}
-    """
-
-    t0 = time.perf_counter()
-    station_name = llm.invoke(extract_prompt).content.strip()
-    logger.info("역명 추출 (%.2fs): '%s'", time.perf_counter() - t0, station_name)
+    # '역' 접미어 제거 (화랑대역 → 화랑대)
+    station_name = input_data.query.strip().removesuffix("역")
+    logger.info("도착 정보 요청: '%s'", station_name)
 
     t0 = time.perf_counter()
     arrivals = _fetch_arrival(station_name)
@@ -140,10 +131,13 @@ def get_realtime_arrival(input_data: MetroQueryInput) -> Dict[str, Any]:
     )
 
     if arrivals is None:
-        return {"error": f"'{station_name}' 역의 도착 정보를 가져오지 못했습니다."}
+        return {
+            "error": f"'{station_name}' 역 도착 정보 API 오류. 잠시 후 재시도하세요."
+        }
     if not arrivals:
         return {
-            "error": f"'{station_name}' 역의 실시간 도착 데이터가 없습니다. 역명을 확인해주세요."
+            "station": station_name,
+            "report": f"**{station_name}역**: 현재 실시간 도착 정보가 없습니다.\n- 운행 종료 시간대이거나 해당 역에 접근 중인 열차가 없을 수 있습니다.\n- 역명을 다시 확인해주세요 (예: 화랑대, 강남).",
         }
 
     simplified = [
@@ -166,10 +160,7 @@ def get_realtime_arrival(input_data: MetroQueryInput) -> Dict[str, Any]:
     report_prompt = f"""
     당신은 서울 지하철 실시간 정보 전문가입니다.
     다음은 '{station_name}' 역의 실시간 도착 정보입니다.
-    사용자 질문 의도에 맞게 핵심 정보를 간결하게 요약하고 안내하세요.
-
-    ### 사용자 질문:
-    {input_data.query}
+    핵심 정보를 간결하게 요약하고 안내하세요.
 
     ### 실시간 도착 데이터:
     {json.dumps(simplified, indent=2, ensure_ascii=False)}
@@ -177,8 +168,12 @@ def get_realtime_arrival(input_data: MetroQueryInput) -> Dict[str, Any]:
     - 도착 예정 시간, 방향, 행선지 중심으로 안내하세요.
     - 막차 정보가 있으면 강조하세요.
     - 마크다운 형식으로 작성하세요.
+    - /think 없이 바로 답변하세요.
     """
 
+    llm = ChatOpenAI(
+        model=LLM_MODEL, base_url=LLM_BASE_URL, api_key="dummy", temperature=0
+    )
     t0 = time.perf_counter()
     report = llm.invoke(report_prompt).content
     logger.info("도착 보고서 생성 (%.2fs)", time.perf_counter() - t0)
@@ -198,24 +193,10 @@ def get_realtime_arrival(input_data: MetroQueryInput) -> Dict[str, Any]:
     description="특정 호선의 실시간 열차 운행 현황(열차 위치)을 조회하고 분석합니다. '2호선 운행 현황', '신분당선 열차 위치' 등의 질문에 사용합니다.",
 )
 def get_realtime_operation(input_data: MetroQueryInput) -> Dict[str, Any]:
-    """자연어 질문에서 호선명을 추출하고 실시간 운행 현황을 반환."""
+    """호선명을 직접 사용해 실시간 운행 현황을 조회하고 Qwen3으로 요약."""
     t_total = time.perf_counter()
-    logger.info("운행 현황 요청: '%s'", input_data.query)
-
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
-    extract_prompt = f"""
-    다음 질문에서 조회할 지하철 호선명만 추출하세요.
-    호선명만 출력하고, 다른 설명은 절대 포함하지 마세요.
-    형식은 반드시 'N호선' 또는 '신분당선', '경의중앙선' 등 정식 호선명으로 출력하세요.
-    (예: 2호선, 신분당선, 경의중앙선, 공항철도)
-
-    질문: {input_data.query}
-    """
-
-    t0 = time.perf_counter()
-    line_name = llm.invoke(extract_prompt).content.strip()
-    logger.info("호선명 추출 (%.2fs): '%s'", time.perf_counter() - t0, line_name)
+    line_name = input_data.query.strip()
+    logger.info("운행 현황 요청: '%s'", line_name)
 
     t0 = time.perf_counter()
     positions = _fetch_position(line_name)
@@ -226,10 +207,11 @@ def get_realtime_operation(input_data: MetroQueryInput) -> Dict[str, Any]:
     )
 
     if positions is None:
-        return {"error": f"'{line_name}' 운행 현황을 가져오지 못했습니다."}
+        return {"error": f"'{line_name}' 운행 현황 API 오류. 잠시 후 재시도하세요."}
     if not positions:
         return {
-            "error": f"'{line_name}'의 실시간 운행 데이터가 없습니다. 호선명을 확인해주세요."
+            "line": line_name,
+            "report": f"**{line_name}**: 현재 실시간 운행 정보가 없습니다.\n- 운행 종료 시간대이거나 호선명을 확인해주세요 (예: 2호선, 6호선, 신분당선).",
         }
 
     simplified = [
@@ -250,20 +232,20 @@ def get_realtime_operation(input_data: MetroQueryInput) -> Dict[str, Any]:
     report_prompt = f"""
     당신은 서울 지하철 실시간 운행 현황 전문가입니다.
     다음은 '{line_name}'의 실시간 열차 위치 정보입니다.
-    사용자 질문 의도에 맞게 운행 현황을 간결하게 요약하세요.
-
-    ### 사용자 질문:
-    {input_data.query}
+    운행 현황을 간결하게 요약하세요.
 
     ### 실시간 운행 데이터 ({len(simplified)}개 열차):
     {json.dumps(simplified, indent=2, ensure_ascii=False)}
 
     - 전체 운행 열차 수, 상행/하행 분포를 요약하세요.
     - 급행/막차 정보를 강조하세요.
-    - 특이사항(지연, 혼잡 구간 등)이 보이면 안내하세요.
     - 마크다운 형식으로 작성하세요.
+    - /think 없이 바로 답변하세요.
     """
 
+    llm = ChatOpenAI(
+        model=LLM_MODEL, base_url=LLM_BASE_URL, api_key="dummy", temperature=0
+    )
     t0 = time.perf_counter()
     report = llm.invoke(report_prompt).content
     logger.info("운행 보고서 생성 (%.2fs)", time.perf_counter() - t0)
